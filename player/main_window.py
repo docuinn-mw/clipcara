@@ -166,7 +166,8 @@ class MainWindow(QMainWindow):
 
         vol.addSpacing(16)
         vol.addWidget(QLabel("Speed"))
-        self.speed_down_btn = QPushButton("− [[]")
+        self.speed_down_btn = QPushButton("−")
+        self.speed_down_btn.setToolTip("Slower — hotkey: [")
         self.speed_down_btn.clicked.connect(lambda: self._change_speed(-0.05))
         vol.addWidget(self.speed_down_btn)
         self.speed_label = QLabel("1.00x")
@@ -174,7 +175,8 @@ class MainWindow(QMainWindow):
         self.speed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.speed_label.setToolTip("Press 1 to reset")
         vol.addWidget(self.speed_label)
-        self.speed_up_btn = QPushButton("+ []]")
+        self.speed_up_btn = QPushButton("+")
+        self.speed_up_btn.setToolTip("Faster — hotkey: ]")
         self.speed_up_btn.clicked.connect(lambda: self._change_speed(0.05))
         vol.addWidget(self.speed_up_btn)
 
