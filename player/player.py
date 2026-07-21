@@ -5,10 +5,13 @@ from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 
 class WaveformLoader(QThread):
-    loaded = pyqtSignal(np.ndarray)  # (bins, 2) float32: per-bin min/max
+    loaded = pyqtSignal(np.ndarray)  # (bins, 3) float32: per-bin min/max/rms
     failed = pyqtSignal(str)
 
     BINS = 4096
+    # Read in large blocks: libsndfile's mp3 decoder returns silent
+    # frames for very small sequential reads, and big reads are faster.
+    BLOCK = 1 << 17
 
     def __init__(self, filepath):
         super().__init__()
@@ -34,19 +37,41 @@ class WaveformLoader(QThread):
             if frames <= 0:
                 raise ValueError("file contains no audio frames")
             bins = int(min(self.BINS, frames))
-            edges = (np.arange(bins + 1, dtype=np.int64) * frames) // bins
-            peaks = np.zeros((bins, 2), dtype=np.float32)
-            for b in range(bins):
+            mins = np.full(bins, np.inf)
+            maxs = np.full(bins, -np.inf)
+            sumsq = np.zeros(bins)
+            counts = np.zeros(bins, dtype=np.int64)
+            pos = 0
+            while pos < frames:
                 if self._cancelled:
                     return None
-                data = f.read(int(edges[b + 1] - edges[b]),
+                data = f.read(min(self.BLOCK, frames - pos),
                               dtype="float32", always_2d=True)
-                if len(data) == 0:
-                    # frame count was an estimate (e.g. some mp3s)
-                    return peaks[:b].copy()
-                mono = data.mean(axis=1)
-                peaks[b, 0] = mono.min()
-                peaks[b, 1] = mono.max()
+                n = len(data)
+                if n == 0:
+                    break  # frame count was an estimate
+                mono = data.mean(axis=1).astype(np.float64)
+                # bin index of each frame; every bin in [b0, b1] occurs,
+                # so segment starts are strictly increasing
+                idx = (pos + np.arange(n, dtype=np.int64)) * bins // frames
+                b0, b1 = int(idx[0]), int(idx[-1])
+                starts = np.searchsorted(idx, np.arange(b0, b1 + 1))
+                seg = slice(b0, b1 + 1)
+                mins[seg] = np.minimum(mins[seg],
+                                       np.minimum.reduceat(mono, starts))
+                maxs[seg] = np.maximum(maxs[seg],
+                                       np.maximum.reduceat(mono, starts))
+                sumsq[seg] += np.add.reduceat(mono * mono, starts)
+                counts[seg] += np.diff(np.append(starts, n))
+                pos += n
+            filled = np.nonzero(counts > 0)[0]
+            if len(filled) == 0:
+                raise ValueError("file contains no audio frames")
+            last = int(filled.max()) + 1
+            peaks = np.zeros((last, 3), dtype=np.float32)
+            peaks[:, 0] = mins[:last]
+            peaks[:, 1] = maxs[:last]
+            peaks[:, 2] = np.sqrt(sumsq[:last] / np.maximum(counts[:last], 1))
             return peaks
 
 

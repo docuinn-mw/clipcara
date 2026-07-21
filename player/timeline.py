@@ -37,8 +37,9 @@ class Timeline(QWidget):
         self.setMinimumHeight(220)
         self.setMouseTracking(True)
 
-        self.peaks = None  # (N, 2) float32 min/max pairs from the loader
-        self.waveform_peaks = []
+        self.peaks = None  # (N, 3) float32 min/max/rms from the loader
+        self.waveform_peaks = []  # per-pixel (lo, hi, rms), display-normalized
+        self._gain = 1.0
 
         self.position = 0
         self.duration = 0
@@ -61,17 +62,27 @@ class Timeline(QWidget):
         if self.peaks is None or len(self.peaks) == 0:
             self.waveform_peaks = []
             return
+        # Normalize the display so the loudest peak fills the height;
+        # quiet recordings stay readable. Cap the boost so near-silence
+        # isn't blown up into full-scale noise.
+        amp = max(float(np.abs(self.peaks[:, :2]).max()), 1e-6)
+        self._gain = min(1.0 / amp, 100.0)
         n = len(self.peaks)
         w = max(1, self.width())
         if n <= w:
-            self.waveform_peaks = [(float(lo), float(hi))
-                                   for lo, hi in self.peaks]
-            return
-        edges = (np.arange(w + 1, dtype=np.int64) * n) // w
+            cols = self.peaks
+        else:
+            edges = (np.arange(w + 1, dtype=np.int64) * n) // w
+            cols = np.array([
+                (self.peaks[edges[i]:edges[i + 1], 0].min(),
+                 self.peaks[edges[i]:edges[i + 1], 1].max(),
+                 np.sqrt(np.mean(self.peaks[edges[i]:edges[i + 1], 2] ** 2)))
+                for i in range(w)
+            ])
         self.waveform_peaks = [
-            (float(self.peaks[edges[i]:edges[i + 1], 0].min()),
-             float(self.peaks[edges[i]:edges[i + 1], 1].max()))
-            for i in range(w)
+            (float(lo) * self._gain, float(hi) * self._gain,
+             float(rms) * self._gain)
+            for lo, hi, rms in cols
         ]
 
     def set_position(self, pos_ms):
@@ -138,29 +149,41 @@ class Timeline(QWidget):
         self._draw_position(painter, w, h)
         self._draw_drag_region(painter, w, h)
 
+    def _envelope_path(self, w, mid_y, scale, top_idx, bottom_idx,
+                       bottom_sign=1.0):
+        n = len(self.waveform_peaks)
+        path = QPainterPath()
+        path.moveTo(0.0, mid_y)
+        for i in range(n):
+            x = i * w / n
+            v = self.waveform_peaks[i][top_idx]
+            path.lineTo(x, mid_y - max(min(v, 1.0), -1.0) * scale)
+        path.lineTo(w, mid_y)
+        for i in range(n - 1, -1, -1):
+            x = i * w / n
+            v = self.waveform_peaks[i][bottom_idx] * bottom_sign
+            path.lineTo(x, mid_y - max(min(v, 1.0), -1.0) * scale)
+        path.closeSubpath()
+        return path
+
     def _draw_waveform(self, painter, w, h, mid_y):
         n = len(self.waveform_peaks)
         if n < 2:
             return
         scale = h / 2 - 4
 
-        path = QPainterPath()
-        path.moveTo(0.0, mid_y)
-        for i, (_, hi) in enumerate(self.waveform_peaks):
-            x = i * w / n
-            y = mid_y - max(min(hi, 1.0), -1.0) * scale
-            path.lineTo(x, y)
-        path.lineTo(w, mid_y)
-        for i in range(n - 1, -1, -1):
-            lo, _ = self.waveform_peaks[i]
-            x = i * w / n
-            y = mid_y - max(min(lo, 1.0), -1.0) * scale
-            path.lineTo(x, y)
-        path.closeSubpath()
-
         painter.setPen(Qt.PenStyle.NoPen)
+
+        # translucent min/max peak envelope
+        envelope = QColor(self.MAUVE)
+        envelope.setAlpha(110)
+        painter.setBrush(envelope)
+        painter.drawPath(self._envelope_path(w, mid_y, scale, 1, 0))
+
+        # solid +/- RMS body showing loudness shape within the envelope
         painter.setBrush(self.MAUVE)
-        painter.drawPath(path)
+        painter.drawPath(self._envelope_path(w, mid_y, scale, 2, 2,
+                                             bottom_sign=-1.0))
 
     def _draw_ab_region(self, painter, w, h):
         if self.mark_a is not None and self.mark_b is not None:
