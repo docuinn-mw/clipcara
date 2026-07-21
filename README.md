@@ -32,6 +32,15 @@ the current Out clears the Out, and vice versa.
 | 1 | Reset speed to 1.00x |
 | Ctrl+O | Open file |
 
+## Packaging
+
+Briefcase builds a native application (macOS .app; Linux AppImage, deb,
+or Flatpak) from the same source:
+
+    .venv/bin/pip install briefcase
+    .venv/bin/briefcase build
+    .venv/bin/briefcase run
+
 ## Tests
 
     .venv/bin/pip install ".[test]"

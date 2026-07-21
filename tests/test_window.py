@@ -1,6 +1,6 @@
 import pytest
 
-from player.main_window import MainWindow
+from clipcara.main_window import MainWindow
 from tests.conftest import wait_until
 
 

@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from player.player import WaveformLoader
-from player.timeline import fmt_time
+from clipcara.player import WaveformLoader
+from clipcara.timeline import fmt_time
 
 
 def test_fmt_time():

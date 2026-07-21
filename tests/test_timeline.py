@@ -2,7 +2,7 @@ import pytest
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtTest import QTest
 
-from player.timeline import Timeline
+from clipcara.timeline import Timeline
 
 
 @pytest.fixture

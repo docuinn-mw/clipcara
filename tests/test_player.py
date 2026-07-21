@@ -1,6 +1,6 @@
 from PyQt6.QtMultimedia import QMediaPlayer
 
-from player.player import AudioPlayer
+from clipcara.player import AudioPlayer
 
 
 def make_player(qapp):
