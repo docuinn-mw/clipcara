@@ -1,0 +1,81 @@
+import pytest
+
+from player.main_window import MainWindow
+from tests.conftest import wait_until
+
+
+@pytest.fixture
+def win(qapp):
+    w = MainWindow()
+    w.resize(850, 480)
+    w.show()
+    yield w
+    w.player.shutdown()
+    w.close()
+
+
+def test_initial_volume_matches_slider(win):
+    assert abs(win.player._audio_output.volume() - 0.7) < 1e-6
+
+
+def test_open_loads_duration_and_waveform(win, tone_files):
+    win._open_file(str(tone_files["wav16"]))
+    assert wait_until(lambda: win.player.duration > 0)
+    assert wait_until(lambda: win.timeline.peaks is not None)
+    assert len(win.timeline.waveform_peaks) > 0
+
+
+def test_open_resets_marks_and_loop(win, tone_files):
+    win._apply_marks(1000, 2000)
+    win.player.loop_enabled = True
+    win.loop_btn.setChecked(True)
+    win._open_file(str(tone_files["wav16"]))
+    assert win.player.mark_a is None and win.player.mark_b is None
+    assert not win.player.loop_enabled
+    assert not win.loop_btn.isChecked()
+
+
+def _fake_position(win, ms, duration=5000):
+    win.player._player.position = lambda: ms
+    win.player._player.duration = lambda: duration
+
+
+def test_mark_ordering(win):
+    _fake_position(win, 2000)
+    win._on_mark_a()
+    assert win.player.mark_a == 2000 and win.player.mark_b is None
+
+    _fake_position(win, 4000)
+    win._on_mark_b()
+    assert win.player.mark_a == 2000 and win.player.mark_b == 4000
+
+    # a new In at/after the Out starts a fresh selection
+    _fake_position(win, 4500)
+    win._on_mark_a()
+    assert win.player.mark_a == 4500 and win.player.mark_b is None
+
+    # a new Out at/before the In starts a fresh selection
+    _fake_position(win, 1000)
+    win._on_mark_b()
+    assert win.player.mark_b == 1000 and win.player.mark_a is None
+    assert win.timeline.mark_a is None and win.timeline.mark_b == 1000
+
+
+def test_region_select_enables_loop(win):
+    win._on_region_selected(500, 1500)
+    assert win.player.loop_enabled
+    assert win.loop_btn.isChecked()
+    assert win.player.mark_a == 500 and win.player.mark_b == 1500
+
+
+def test_speed_steps_and_clamps(win):
+    win._set_speed(1.0)
+    win._change_speed(0.05)
+    assert abs(win.player.playback_rate - 1.05) < 1e-4
+    assert win.speed_label.text() == "1.05x"
+    win._change_speed(0.05)  # stepping from the float32 value Qt returns
+    assert win.speed_label.text() == "1.10x"
+    win._set_speed(9.9)
+    assert win.speed_label.text() == "2.00x"
+    win._set_speed(0.1)
+    assert win.speed_label.text() == "0.50x"
