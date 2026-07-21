@@ -395,6 +395,12 @@ class MainWindow(QMainWindow):
 
     def _on_view_changed(self, start_ms, end_ms):
         self._pending_view = (start_ms, end_ms)
+        # long debounce only while refining an already-covered view
+        # (mid zoom gesture); an uncovered view is showing low-res
+        # fallback right now, so re-decode almost immediately
+        r = self.timeline.view_peaks_range
+        covered = r is not None and r[0] <= start_ms and end_ms <= r[1]
+        self._view_timer.setInterval(250 if covered else 30)
         self._view_timer.start()
 
     def _request_view_peaks(self):
@@ -408,7 +414,12 @@ class MainWindow(QMainWindow):
         base_bins_in_view = WaveformLoader.BINS * span / self.player.duration
         if base_bins_in_view >= width:
             return  # whole-file peaks already resolve this view
-        self.player.request_view_peaks(start_ms, end_ms, min(width, 4096))
+        # decode one span of margin either side so view-follow paging
+        # and small pans land on already-covered ground
+        req_start = max(0, start_ms - span)
+        req_end = min(self.player.duration, end_ms + span)
+        bins = int(min(width * (req_end - req_start) / span, 12288))
+        self.player.request_view_peaks(req_start, req_end, bins)
 
     # --- export -----------------------------------------------------------
 

@@ -136,6 +136,29 @@ def test_loop_selection_seeks_into_loop(win, tone_files, tmp_path):
     assert win.player.loop_enabled
 
 
+def test_view_refinement_covers_neighboring_pages(win):
+    _fake_position(win, 0, duration=600000)
+    reqs = []
+    win.player.request_view_peaks = lambda s, e, b: reqs.append((s, e, b))
+    win._pending_view = (100000, 110000)
+    win._request_view_peaks()
+    s, e, b = reqs[0]
+    # one 10s span of margin decoded either side of the 10s view
+    assert s == 90000 and e == 120000
+    width = max(win.timeline.width(), 512)
+    assert b == min(3 * width, 12288)
+
+
+def test_view_refinement_clamps_margin_at_file_edges(win):
+    _fake_position(win, 0, duration=600000)
+    reqs = []
+    win.player.request_view_peaks = lambda s, e, b: reqs.append((s, e, b))
+    win._pending_view = (0, 10000)
+    win._request_view_peaks()
+    s, e, _ = reqs[0]
+    assert s == 0 and e == 20000
+
+
 def test_speed_steps_and_clamps(win):
     win._set_speed(1.0)
     win._change_speed(0.05)
