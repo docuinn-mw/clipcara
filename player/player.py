@@ -204,6 +204,13 @@ class AudioPlayer(QObject):
     def is_playing(self):
         return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
 
+    def set_playback_rate(self, rate):
+        self._player.setPlaybackRate(rate)
+
+    @property
+    def playback_rate(self):
+        return self._player.playbackRate()
+
     def set_volume(self, volume):
         self._audio_output.setVolume(volume / 100.0)
 

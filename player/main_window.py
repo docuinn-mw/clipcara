@@ -163,6 +163,21 @@ class MainWindow(QMainWindow):
         self.vol_slider.valueChanged.connect(self.player.set_volume)
         self.vol_slider.setValue(70)
         vol.addWidget(self.vol_slider, 1)
+
+        vol.addSpacing(16)
+        vol.addWidget(QLabel("Speed"))
+        self.speed_down_btn = QPushButton("− [[]")
+        self.speed_down_btn.clicked.connect(lambda: self._change_speed(-0.05))
+        vol.addWidget(self.speed_down_btn)
+        self.speed_label = QLabel("1.00x")
+        self.speed_label.setMinimumWidth(48)
+        self.speed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.speed_label.setToolTip("Press 1 to reset")
+        vol.addWidget(self.speed_label)
+        self.speed_up_btn = QPushButton("+ []]")
+        self.speed_up_btn.clicked.connect(lambda: self._change_speed(0.05))
+        vol.addWidget(self.speed_up_btn)
+
         layout.addLayout(vol)
 
     def _setup_shortcuts(self):
@@ -188,6 +203,13 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Down), self, self._vol_down)
         # S = stop
         QShortcut(QKeySequence(Qt.Key.Key_S), self, self.player.stop)
+        # [ / ] = slower / faster, 1 = normal speed
+        QShortcut(QKeySequence(Qt.Key.Key_BracketLeft), self,
+                  lambda: self._change_speed(-0.05))
+        QShortcut(QKeySequence(Qt.Key.Key_BracketRight), self,
+                  lambda: self._change_speed(0.05))
+        QShortcut(QKeySequence(Qt.Key.Key_1), self,
+                  lambda: self._set_speed(1.0))
         # Ctrl+O = open
         QShortcut(QKeySequence("Ctrl+O"), self, self._on_open)
 
@@ -290,6 +312,14 @@ class MainWindow(QMainWindow):
         b = fmt_time(self.player.mark_b) if self.player.mark_b is not None else "--"
         state = "ON" if self.player.loop_enabled else "OFF"
         self.marks_label.setText(f"A: {a}  B: {b}  Loop: {state}")
+
+    def _change_speed(self, delta):
+        self._set_speed(self.player.playback_rate + delta)
+
+    def _set_speed(self, rate):
+        rate = max(0.5, min(2.0, round(rate * 20) / 20))
+        self.player.set_playback_rate(rate)
+        self.speed_label.setText(f"{rate:.2f}x")
 
     def _vol_up(self):
         v = min(100, self.vol_slider.value() + 10)
