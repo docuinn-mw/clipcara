@@ -216,21 +216,28 @@ class MainWindow(QMainWindow):
             return
         self.player.toggle_play()
 
+    def _apply_marks(self, a, b):
+        self.player.set_marks(a, b)
+        self.timeline.set_marks(a, b)
+        self._update_marks_label()
+
     def _on_mark_a(self):
         if self.player.duration <= 0:
             return
         pos = self.player.position
-        self.player.set_marks(a=pos)
-        self.timeline.set_marks(a=pos)
-        self._update_marks_label()
+        b = self.player.mark_b
+        if b is not None and b <= pos:
+            b = None  # a new In at/after the Out starts a fresh selection
+        self._apply_marks(pos, b)
 
     def _on_mark_b(self):
         if self.player.duration <= 0:
             return
         pos = self.player.position
-        self.player.set_marks(b=pos)
-        self.timeline.set_marks(b=pos)
-        self._update_marks_label()
+        a = self.player.mark_a
+        if a is not None and a >= pos:
+            a = None  # a new Out at/before the In starts a fresh selection
+        self._apply_marks(a, pos)
 
     def _on_toggle_loop(self):
         enabled = self.player.toggle_loop()
@@ -245,11 +252,9 @@ class MainWindow(QMainWindow):
         self._update_marks_label()
 
     def _on_region_selected(self, a, b):
-        self.player.set_marks(a=a, b=b)
-        self.timeline.set_marks(a=a, b=b)
         self.player.loop_enabled = True
         self.loop_btn.setChecked(True)
-        self._update_marks_label()
+        self._apply_marks(a, b)
 
     def _on_position_changed(self, pos):
         self.timeline.set_position(pos)

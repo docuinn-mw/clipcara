@@ -58,10 +58,6 @@ class AudioPlayer(QObject):
     waveformFailed = pyqtSignal(str)
     mediaError = pyqtSignal(str)
 
-    # Loop only on a natural playback crossing of B; a seek jump larger
-    # than this lands past B without snapping back to A.
-    LOOP_SNAP_MS = 2000
-
     def __init__(self):
         super().__init__()
         self._player = QMediaPlayer()
@@ -77,19 +73,20 @@ class AudioPlayer(QObject):
         self._filepath = None
         self._loader = None
         self._pending_loaders = set()
-        self._last_pos = 0
 
         self.loop_enabled = False
         self.mark_a = None
         self.mark_b = None
 
     def _on_position_changed(self, pos):
+        # With loop on, playback is confined to [A, B]: anything at or
+        # past B snaps back to A, including when loop was just enabled
+        # with the playhead already beyond B.
         if self.loop_enabled and self.mark_a is not None and self.mark_b is not None:
             a = min(self.mark_a, self.mark_b)
             b = max(self.mark_a, self.mark_b)
-            if self._last_pos < b <= pos and pos - self._last_pos < self.LOOP_SNAP_MS:
+            if pos >= b > a:
                 self._player.setPosition(int(a))
-        self._last_pos = pos
         self.positionChanged.emit(pos)
 
     def _on_state_changed(self, state):
@@ -111,7 +108,6 @@ class AudioPlayer(QObject):
 
     def open(self, filepath):
         self._filepath = filepath
-        self._last_pos = 0
         self._player.setSource(QUrl.fromLocalFile(filepath))
         self._start_waveform_load(filepath)
 
@@ -190,11 +186,9 @@ class AudioPlayer(QObject):
     def volume(self):
         return int(self._audio_output.volume() * 100)
 
-    def set_marks(self, a=None, b=None):
-        if a is not None:
-            self.mark_a = a
-        if b is not None:
-            self.mark_b = b
+    def set_marks(self, a, b):
+        self.mark_a = a
+        self.mark_b = b
 
     def clear_marks(self):
         self.mark_a = None

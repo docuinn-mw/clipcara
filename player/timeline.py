@@ -82,11 +82,9 @@ class Timeline(QWidget):
         self.duration = dur_ms
         self.update()
 
-    def set_marks(self, a=None, b=None):
-        if a is not None:
-            self.mark_a = a
-        if b is not None:
-            self.mark_b = b
+    def set_marks(self, a, b):
+        self.mark_a = a
+        self.mark_b = b
         self.update()
 
     def clear_marks(self):
