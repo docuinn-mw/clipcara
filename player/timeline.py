@@ -4,9 +4,23 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QPainterPath
 
 
+def fmt_time(ms):
+    if ms is None or ms < 0:
+        return "--:--"
+    total_sec = ms // 1000
+    h = total_sec // 3600
+    m = (total_sec // 60) % 60
+    s = total_sec % 60
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
 class Timeline(QWidget):
     seekRequested = pyqtSignal(int)
     regionSelected = pyqtSignal(int, int)
+
+    DRAG_THRESHOLD_PX = 4
 
     BASE = QColor("#1e1e2e")
     SURFACE = QColor("#313244")
@@ -23,8 +37,7 @@ class Timeline(QWidget):
         self.setMinimumHeight(220)
         self.setMouseTracking(True)
 
-        self.raw_samples = None
-        self.sample_rate = None
+        self.peaks = None  # (N, 2) float32 min/max pairs from the loader
         self.waveform_peaks = []
 
         self.position = 0
@@ -36,23 +49,29 @@ class Timeline(QWidget):
         self._dragging = False
         self._drag_start = 0
         self._drag_current = 0
+        self._press_x = 0
+        self._cur_x = 0
 
-    def set_waveform(self, samples, sample_rate):
-        self.raw_samples = samples
-        self.sample_rate = sample_rate
-        self._compute_peaks()
+    def set_waveform(self, peaks):
+        self.peaks = peaks
+        self._compute_display_peaks()
         self.update()
 
-    def _compute_peaks(self):
-        if self.raw_samples is None or len(self.raw_samples) == 0:
+    def _compute_display_peaks(self):
+        if self.peaks is None or len(self.peaks) == 0:
             self.waveform_peaks = []
             return
-        num_points = max(1, self.width())
-        chunk = max(1, len(self.raw_samples) // num_points)
+        n = len(self.peaks)
+        w = max(1, self.width())
+        if n <= w:
+            self.waveform_peaks = [(float(lo), float(hi))
+                                   for lo, hi in self.peaks]
+            return
+        edges = (np.arange(w + 1, dtype=np.int64) * n) // w
         self.waveform_peaks = [
-            (self.raw_samples[i:i+chunk].min(),
-             self.raw_samples[i:i+chunk].max())
-            for i in range(0, len(self.raw_samples), chunk)
+            (float(self.peaks[edges[i]:edges[i + 1], 0].min()),
+             float(self.peaks[edges[i]:edges[i + 1], 1].max()))
+            for i in range(w)
         ]
 
     def set_position(self, pos_ms):
@@ -84,12 +103,15 @@ class Timeline(QWidget):
         w = self.width()
         if w <= 0:
             return 0
-        return int(max(0, x * self.duration / w))
+        return int(min(max(0, x * self.duration / w), self.duration))
+
+    def _is_drag(self):
+        return abs(self._cur_x - self._press_x) > self.DRAG_THRESHOLD_PX
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.raw_samples is not None:
-            self._compute_peaks()
+        if self.peaks is not None:
+            self._compute_display_peaks()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -101,13 +123,18 @@ class Timeline(QWidget):
 
         painter.fillRect(0, 0, w, h, self.BASE)
 
-        if self.duration <= 0 or not self.waveform_peaks:
+        if self.duration <= 0:
             painter.setPen(self.SUBTEXT)
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
                              "Open an audio file")
             return
 
-        self._draw_waveform(painter, w, h, mid_y)
+        if self.waveform_peaks:
+            self._draw_waveform(painter, w, h, mid_y)
+        else:
+            # No waveform (still loading or undecodable) — timeline stays usable
+            painter.setPen(QPen(self.SURFACE, 2))
+            painter.drawLine(0, int(mid_y), w, int(mid_y))
         self._draw_ab_region(painter, w, h)
         self._draw_markers(painter, w, h)
         self._draw_position(painter, w, h)
@@ -147,15 +174,14 @@ class Timeline(QWidget):
                              QColor(203, 166, 247, 30))
 
     def _draw_drag_region(self, painter, w, h):
-        if not self._dragging:
+        if not self._dragging or not self._is_drag():
             return
         a = min(self._drag_start, self._drag_current)
         b = max(self._drag_start, self._drag_current)
-        if b - a > 500:
-            ax = self._ms_to_x(a)
-            bx = self._ms_to_x(b)
-            painter.fillRect(ax, 0, bx - ax, h,
-                             QColor(249, 226, 175, 30))
+        ax = self._ms_to_x(a)
+        bx = self._ms_to_x(b)
+        painter.fillRect(ax, 0, bx - ax, h,
+                         QColor(249, 226, 175, 30))
 
     def _draw_markers(self, painter, w, h):
         font = painter.font()
@@ -181,42 +207,42 @@ class Timeline(QWidget):
         painter.setPen(QPen(self.PINK, 2))
         painter.drawLine(x, 0, x, h)
 
-        # Time tooltip near position
-        minutes = self.position // 60000
-        seconds = (self.position // 1000) % 60
-        time_str = f"{minutes:02d}:{seconds:02d}"
         painter.setPen(self.PINK)
-        painter.drawText(x + 4, h - 6, time_str)
+        painter.drawText(x + 4, h - 6, fmt_time(self.position))
 
     def mousePressEvent(self, event):
         if self.duration <= 0:
             return
 
-        ms = self._x_to_ms(int(event.position().x()))
+        x = int(event.position().x())
+        ms = self._x_to_ms(x)
 
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
+            self._press_x = x
+            self._cur_x = x
             self._drag_start = ms
             self._drag_current = ms
             self.seekRequested.emit(ms)
 
     def mouseMoveEvent(self, event):
         if self._dragging:
-            ms = self._x_to_ms(int(event.position().x()))
-            self._drag_current = ms
+            self._cur_x = int(event.position().x())
+            self._drag_current = self._x_to_ms(self._cur_x)
             self.update()
 
     def mouseReleaseEvent(self, event):
-        if self._dragging:
-            self._dragging = False
-            ms = self._x_to_ms(int(event.position().x()))
-            self._drag_current = ms
-            dragged = abs(self._drag_current - self._drag_start)
-            if dragged > 500:
-                a = min(self._drag_start, self._drag_current)
-                b = max(self._drag_start, self._drag_current)
+        if event.button() != Qt.MouseButton.LeftButton or not self._dragging:
+            return
+        self._dragging = False
+        self._cur_x = int(event.position().x())
+        self._drag_current = self._x_to_ms(self._cur_x)
+        if self._is_drag():
+            a = min(self._drag_start, self._drag_current)
+            b = max(self._drag_start, self._drag_current)
+            if a < b:
                 self.regionSelected.emit(a, b)
-            self.update()
+        self.update()
 
     def mouseDoubleClickEvent(self, event):
         if self.duration <= 0:
@@ -225,4 +251,5 @@ class Timeline(QWidget):
         half_window = 2000
         a = max(0, ms - half_window)
         b = min(self.duration, ms + half_window)
-        self.regionSelected.emit(a, b)
+        if a < b:
+            self.regionSelected.emit(a, b)

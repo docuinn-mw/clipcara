@@ -1,12 +1,14 @@
+import os
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLabel, QSlider, QMessageBox
 )
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QShortcut
 
 from .player import AudioPlayer
-from .timeline import Timeline
+from .timeline import Timeline, fmt_time
 
 
 BASE = "#1e1e2e"
@@ -55,15 +57,6 @@ QSlider::sub-page:horizontal {{
 """
 
 
-def fmt_time(ms):
-    if ms is None or ms < 0:
-        return "--:--"
-    total_sec = ms // 1000
-    m = total_sec // 60
-    s = total_sec % 60
-    return f"{m:02d}:{s:02d}"
-
-
 class MainWindow(QMainWindow):
     def __init__(self, filepath=None):
         super().__init__()
@@ -88,6 +81,8 @@ class MainWindow(QMainWindow):
         self.player.durationChanged.connect(self._on_duration_changed)
         self.player.playbackStateChanged.connect(self._on_playback_state_changed)
         self.player.waveformReady.connect(self._on_waveform_ready)
+        self.player.waveformFailed.connect(self._on_waveform_failed)
+        self.player.mediaError.connect(self._on_media_error)
 
         self.timeline.seekRequested.connect(self.player.seek)
         self.timeline.regionSelected.connect(self._on_region_selected)
@@ -165,8 +160,8 @@ class MainWindow(QMainWindow):
         vol.addWidget(QLabel("Vol"))
         self.vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.vol_slider.setRange(0, 100)
-        self.vol_slider.setValue(70)
         self.vol_slider.valueChanged.connect(self.player.set_volume)
+        self.vol_slider.setValue(70)
         vol.addWidget(self.vol_slider, 1)
         layout.addLayout(vol)
 
@@ -206,10 +201,14 @@ class MainWindow(QMainWindow):
         self._open_file(path)
 
     def _open_file(self, path):
-        self.file_label.setText(path.split("/")[-1])
+        self.file_label.setText(os.path.basename(path))
+        self.statusBar().clearMessage()
+        self.timeline.set_waveform(None)
         self.player.open(path)
         self.timeline.clear_marks()
         self.player.clear_marks()
+        self.player.loop_enabled = False
+        self.loop_btn.setChecked(False)
         self._update_marks_label()
 
     def _on_play(self):
@@ -263,8 +262,18 @@ class MainWindow(QMainWindow):
     def _on_playback_state_changed(self, playing):
         self.play_btn.setText("\u23F8 Pause" if playing else "\u25B6 Play")
 
-    def _on_waveform_ready(self, samples, sample_rate):
-        self.timeline.set_waveform(samples, sample_rate)
+    def _on_waveform_ready(self, peaks):
+        self.timeline.set_waveform(peaks)
+
+    def _on_waveform_failed(self, message):
+        self.statusBar().showMessage(f"Waveform unavailable: {message}")
+
+    def _on_media_error(self, message):
+        QMessageBox.warning(self, "Playback error", message)
+
+    def closeEvent(self, event):
+        self.player.shutdown()
+        super().closeEvent(event)
 
     def _update_time_label(self):
         cur = fmt_time(self.player.position)
