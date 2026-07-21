@@ -5,7 +5,8 @@ from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 
 class WaveformLoader(QThread):
-    loaded = pyqtSignal(np.ndarray)  # (bins, 3) float32: per-bin min/max/rms
+    # peaks (bins, 3) float32 min/max/rms, plus the ms range they cover
+    loaded = pyqtSignal(np.ndarray, int, int)
     failed = pyqtSignal(str)
 
     BINS = 4096
@@ -13,9 +14,12 @@ class WaveformLoader(QThread):
     # frames for very small sequential reads, and big reads are faster.
     BLOCK = 1 << 17
 
-    def __init__(self, filepath):
+    def __init__(self, filepath, start_ms=None, end_ms=None, bins=None):
         super().__init__()
         self.filepath = filepath
+        self.start_ms = start_ms
+        self.end_ms = end_ms
+        self.bins = bins if bins else self.BINS
         self._cancelled = False
 
     def cancel(self):
@@ -23,20 +27,32 @@ class WaveformLoader(QThread):
 
     def run(self):
         try:
-            peaks = self._compute_peaks()
+            result = self._compute_peaks()
         except Exception as e:
             if not self._cancelled:
                 self.failed.emit(str(e))
             return
-        if peaks is not None and len(peaks) and not self._cancelled:
-            self.loaded.emit(peaks)
+        if result is not None and not self._cancelled:
+            peaks, s_ms, e_ms = result
+            if len(peaks):
+                self.loaded.emit(peaks, s_ms, e_ms)
 
     def _compute_peaks(self):
         with sf.SoundFile(self.filepath) as f:
-            frames = f.frames
-            if frames <= 0:
+            sr = f.samplerate
+            total = f.frames
+            if total <= 0 or sr <= 0:
                 raise ValueError("file contains no audio frames")
-            bins = int(min(self.BINS, frames))
+            start = (0 if self.start_ms is None
+                     else max(0, min(int(self.start_ms * sr / 1000), total)))
+            stop = (total if self.end_ms is None
+                    else max(start, min(int(self.end_ms * sr / 1000), total)))
+            frames = stop - start
+            if frames <= 0:
+                raise ValueError("empty region")
+            if start:
+                f.seek(start)
+            bins = int(min(self.bins, frames))
             mins = np.full(bins, np.inf)
             maxs = np.full(bins, -np.inf)
             sumsq = np.zeros(bins)
@@ -72,7 +88,33 @@ class WaveformLoader(QThread):
             peaks[:, 0] = mins[:last]
             peaks[:, 1] = maxs[:last]
             peaks[:, 2] = np.sqrt(sumsq[:last] / np.maximum(counts[:last], 1))
-            return peaks
+            covered = start + pos  # frames actually decoded
+            return (peaks, int(start * 1000 / sr),
+                    int(min(stop, covered) * 1000 / sr))
+
+
+def export_region(src_path, dst_path, start_ms, end_ms):
+    """Write [start_ms, end_ms) of src_path to dst_path as WAV."""
+    with sf.SoundFile(src_path) as f:
+        sr = f.samplerate
+        start = max(0, min(int(start_ms * sr / 1000), f.frames))
+        stop = max(start, min(int(end_ms * sr / 1000), f.frames))
+        if stop <= start:
+            raise ValueError("empty region")
+        subtype = (f.subtype if f.subtype in
+                   ("PCM_U8", "PCM_16", "PCM_24", "PCM_32", "FLOAT", "DOUBLE")
+                   else "PCM_16")
+        f.seek(start)
+        with sf.SoundFile(dst_path, "w", samplerate=sr, channels=f.channels,
+                          subtype=subtype, format="WAV") as out:
+            remaining = stop - start
+            while remaining > 0:
+                block = f.read(min(WaveformLoader.BLOCK, remaining),
+                               dtype="float32", always_2d=True)
+                if len(block) == 0:
+                    break
+                out.write(block)
+                remaining -= len(block)
 
 
 class AudioPlayer(QObject):
@@ -80,6 +122,7 @@ class AudioPlayer(QObject):
     durationChanged = pyqtSignal(int)
     playbackStateChanged = pyqtSignal(bool)
     waveformReady = pyqtSignal(np.ndarray)
+    viewPeaksReady = pyqtSignal(np.ndarray, int, int)
     waveformFailed = pyqtSignal(str)
     mediaError = pyqtSignal(str)
 
@@ -97,6 +140,7 @@ class AudioPlayer(QObject):
 
         self._filepath = None
         self._loader = None
+        self._view_loader = None
         self._pending_loaders = set()
 
         self.loop_enabled = False
@@ -131,36 +175,66 @@ class AudioPlayer(QObject):
         if error != QMediaPlayer.Error.NoError:
             self.mediaError.emit(error_string or "Unable to play this file")
 
+    @property
+    def filepath(self):
+        return self._filepath
+
     def open(self, filepath):
         self._filepath = filepath
         self._player.setSource(QUrl.fromLocalFile(filepath))
         self._start_waveform_load(filepath)
 
+    def _start_loader(self, loader, on_loaded, on_failed):
+        self._pending_loaders.add(loader)
+        loader.loaded.connect(
+            lambda peaks, s, e, l=loader: on_loaded(l, peaks, s, e))
+        loader.failed.connect(
+            lambda msg, l=loader: on_failed(l, msg))
+        loader.finished.connect(
+            lambda l=loader: self._on_loader_finished(l))
+        loader.start()
+
     def _start_waveform_load(self, filepath):
         if self._loader is not None:
             self._loader.cancel()
-        loader = WaveformLoader(filepath)
-        self._pending_loaders.add(loader)
-        loader.loaded.connect(
-            lambda peaks, l=loader: self._on_waveform_loaded(l, peaks))
-        loader.failed.connect(
-            lambda msg, l=loader: self._on_waveform_failed(l, msg))
-        loader.finished.connect(
-            lambda l=loader: self._on_loader_finished(l))
-        self._loader = loader
-        loader.start()
+        if self._view_loader is not None:
+            self._view_loader.cancel()
+            self._view_loader = None
+        self._loader = WaveformLoader(filepath)
+        self._start_loader(self._loader, self._on_waveform_loaded,
+                           self._on_waveform_failed)
+
+    def request_view_peaks(self, start_ms, end_ms, bins):
+        """Decode a slice of the current file at higher resolution for
+        a zoomed-in timeline view."""
+        if not self._filepath:
+            return
+        if self._view_loader is not None:
+            self._view_loader.cancel()
+        self._view_loader = WaveformLoader(self._filepath, start_ms, end_ms,
+                                           bins)
+        self._start_loader(self._view_loader, self._on_view_loaded,
+                           self._on_view_failed)
 
     def _on_loader_finished(self, loader):
         self._pending_loaders.discard(loader)
         loader.deleteLater()
 
-    def _on_waveform_loaded(self, loader, peaks):
+    def _on_waveform_loaded(self, loader, peaks, s_ms, e_ms):
         if loader is self._loader:
             self.waveformReady.emit(peaks)
 
     def _on_waveform_failed(self, loader, message):
         if loader is self._loader:
             self.waveformFailed.emit(message)
+
+    def _on_view_loaded(self, loader, peaks, s_ms, e_ms):
+        if loader is self._view_loader:
+            self.viewPeaksReady.emit(peaks, s_ms, e_ms)
+
+    def _on_view_failed(self, loader, message):
+        # a failed zoom refinement is not fatal; the base peaks remain
+        pass
 
     def shutdown(self):
         for loader in list(self._pending_loaders):

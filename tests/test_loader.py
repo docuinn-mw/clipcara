@@ -14,7 +14,9 @@ def test_fmt_time():
 
 @pytest.mark.parametrize("key", ["wav16", "wav24", "mp3"])
 def test_peaks(tone_files, key):
-    peaks = WaveformLoader(str(tone_files[key]))._compute_peaks()
+    peaks, s_ms, e_ms = WaveformLoader(str(tone_files[key]))._compute_peaks()
+    assert s_ms == 0
+    assert 4900 <= e_ms <= 5200
     assert peaks.ndim == 2 and peaks.shape[1] == 3
     assert len(peaks) > 1000
     # envelope of a 0.5-amplitude sine (mp3 may overshoot slightly)
@@ -35,3 +37,14 @@ def test_cancel_returns_none(tone_files):
     loader = WaveformLoader(str(tone_files["wav16"]))
     loader.cancel()
     assert loader._compute_peaks() is None
+
+
+def test_view_slice_peaks(tone_files):
+    loader = WaveformLoader(str(tone_files["wav16"]),
+                            start_ms=1000, end_ms=2000, bins=100)
+    peaks, s_ms, e_ms = loader._compute_peaks()
+    assert (s_ms, e_ms) == (1000, 2000)
+    assert len(peaks) == 100
+    # every bin of a continuous 0.5 sine reaches the envelope
+    assert 0.45 < peaks[:, 1].min() < 0.55
+    assert 0.3 < peaks[:, 2].mean() < 0.4

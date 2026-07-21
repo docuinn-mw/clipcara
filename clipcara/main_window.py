@@ -2,12 +2,14 @@ import os
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QFileDialog, QLabel, QSlider, QMessageBox
+    QPushButton, QFileDialog, QLabel, QSlider, QMessageBox,
+    QComboBox, QInputDialog
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
 
-from .player import AudioPlayer
+from .loops import LoopStore
+from .player import AudioPlayer, WaveformLoader, export_region
 from .timeline import Timeline, fmt_time
 
 
@@ -58,6 +60,8 @@ QSlider::sub-page:horizontal {{
 
 
 class MainWindow(QMainWindow):
+    NUDGE_MS = 50
+
     def __init__(self, filepath=None):
         super().__init__()
         self.setWindowTitle("Clipcara")
@@ -71,6 +75,8 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
 
         self.player = AudioPlayer()
+        self.loop_store = LoopStore()
+        self._current_loops = []
 
         self._build_top_bar(layout)
         self._build_timeline(layout)
@@ -87,7 +93,18 @@ class MainWindow(QMainWindow):
         self.timeline.seekRequested.connect(self.player.seek)
         self.timeline.regionSelected.connect(self._on_region_selected)
 
+        # zoomed views get re-decoded at higher resolution, debounced
+        self.player.viewPeaksReady.connect(self.timeline.set_view_peaks)
+        self.timeline.viewChanged.connect(self._on_view_changed)
+        self._pending_view = None
+        self._view_timer = QTimer(self)
+        self._view_timer.setSingleShot(True)
+        self._view_timer.setInterval(250)
+        self._view_timer.timeout.connect(self._request_view_peaks)
+
         self._setup_shortcuts()
+        self._refresh_loops()
+        self._update_marks_label()
 
         if filepath:
             self._open_file(filepath)
@@ -100,6 +117,21 @@ class MainWindow(QMainWindow):
 
         self.file_label = QLabel("No file loaded")
         bar.addWidget(self.file_label, 1)
+
+        self.loop_combo = QComboBox()
+        self.loop_combo.setPlaceholderText("Saved loops")
+        self.loop_combo.setMinimumWidth(160)
+        self.loop_combo.activated.connect(self._on_loop_selected)
+        bar.addWidget(self.loop_combo)
+
+        self.save_loop_btn = QPushButton("Save Loop")
+        self.save_loop_btn.clicked.connect(self._on_save_loop)
+        bar.addWidget(self.save_loop_btn)
+
+        self.del_loop_btn = QPushButton("Delete")
+        self.del_loop_btn.clicked.connect(self._on_delete_loop)
+        bar.addWidget(self.del_loop_btn)
+
         layout.addLayout(bar)
 
     def _build_timeline(self, layout):
@@ -152,6 +184,11 @@ class MainWindow(QMainWindow):
         self.clear_btn = QPushButton("Clear [Esc]")
         self.clear_btn.clicked.connect(self._on_clear_marks)
         ctrl.addWidget(self.clear_btn)
+
+        self.export_btn = QPushButton("Export [E]")
+        self.export_btn.setToolTip("Write the A-B region to a WAV file")
+        self.export_btn.clicked.connect(self._on_export)
+        ctrl.addWidget(self.export_btn)
 
         layout.addLayout(ctrl)
 
@@ -212,6 +249,20 @@ class MainWindow(QMainWindow):
                   lambda: self._change_speed(0.05))
         QShortcut(QKeySequence(Qt.Key.Key_1), self,
                   lambda: self._set_speed(1.0))
+        # , / . = nudge A by 50ms; < / > = nudge B
+        QShortcut(QKeySequence(","), self,
+                  lambda: self._nudge_mark("a", -self.NUDGE_MS))
+        QShortcut(QKeySequence("."), self,
+                  lambda: self._nudge_mark("a", self.NUDGE_MS))
+        QShortcut(QKeySequence("Shift+,"), self,
+                  lambda: self._nudge_mark("b", -self.NUDGE_MS))
+        QShortcut(QKeySequence("Shift+."), self,
+                  lambda: self._nudge_mark("b", self.NUDGE_MS))
+        # Z = zoom to A-B selection, F = full view
+        QShortcut(QKeySequence(Qt.Key.Key_Z), self, self._zoom_to_selection)
+        QShortcut(QKeySequence(Qt.Key.Key_F), self, self.timeline.zoom_full)
+        # E = export A-B region
+        QShortcut(QKeySequence(Qt.Key.Key_E), self, self._on_export)
         # Ctrl+O = open
         QShortcut(QKeySequence("Ctrl+O"), self, self._on_open)
 
@@ -233,6 +284,7 @@ class MainWindow(QMainWindow):
         self.player.clear_marks()
         self.player.loop_enabled = False
         self.loop_btn.setChecked(False)
+        self._refresh_loops()
         self._update_marks_label()
 
     def _on_play(self):
@@ -314,6 +366,117 @@ class MainWindow(QMainWindow):
         b = fmt_time(self.player.mark_b) if self.player.mark_b is not None else "--"
         state = "ON" if self.player.loop_enabled else "OFF"
         self.marks_label.setText(f"A: {a}  B: {b}  Loop: {state}")
+        has_region = (self.player.mark_a is not None
+                      and self.player.mark_b is not None)
+        self.export_btn.setEnabled(has_region)
+        self.save_loop_btn.setEnabled(has_region)
+
+    # --- marks: nudge and zoom -----------------------------------------
+
+    def _nudge_mark(self, which, delta):
+        a, b = self.player.mark_a, self.player.mark_b
+        dur = self.player.duration
+        if which == "a":
+            if a is None:
+                return
+            a = max(0, min(a + delta, b if b is not None else dur))
+        else:
+            if b is None:
+                return
+            b = max(a if a is not None else 0, min(b + delta, dur))
+        self._apply_marks(a, b)
+
+    def _zoom_to_selection(self):
+        a, b = self.player.mark_a, self.player.mark_b
+        if a is not None and b is not None and a < b:
+            self.timeline.zoom_to(a, b)
+
+    # --- zoomed-view refinement ------------------------------------------
+
+    def _on_view_changed(self, start_ms, end_ms):
+        self._pending_view = (start_ms, end_ms)
+        self._view_timer.start()
+
+    def _request_view_peaks(self):
+        if self._pending_view is None or self.player.duration <= 0:
+            return
+        start_ms, end_ms = self._pending_view
+        span = end_ms - start_ms
+        if span <= 0 or span >= self.player.duration:
+            return
+        width = max(self.timeline.width(), 512)
+        base_bins_in_view = WaveformLoader.BINS * span / self.player.duration
+        if base_bins_in_view >= width:
+            return  # whole-file peaks already resolve this view
+        self.player.request_view_peaks(start_ms, end_ms, min(width, 4096))
+
+    # --- export -----------------------------------------------------------
+
+    def _on_export(self):
+        a, b = self.player.mark_a, self.player.mark_b
+        src = self.player.filepath
+        if a is None or b is None or a >= b or not src:
+            return
+        stem = os.path.splitext(os.path.basename(src))[0]
+        times = f"{fmt_time(a)}-{fmt_time(b)}".replace(":", ".")
+        default = os.path.join(os.path.dirname(src), f"{stem} {times}.wav")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Region", default, "WAV audio (*.wav)")
+        if not path:
+            return
+        try:
+            export_region(src, path, a, b)
+        except Exception as e:
+            QMessageBox.warning(self, "Export failed", str(e))
+            return
+        self.statusBar().showMessage(
+            f"Exported {os.path.basename(path)}", 5000)
+
+    # --- saved loops --------------------------------------------------------
+
+    def _refresh_loops(self, select_name=None):
+        self._current_loops = (self.loop_store.loops_for(self.player.filepath)
+                               if self.player.filepath else [])
+        self.loop_combo.clear()
+        for loop in self._current_loops:
+            self.loop_combo.addItem(
+                f'{loop["name"]}  ({fmt_time(loop["a"])}-{fmt_time(loop["b"])})')
+        self.loop_combo.setCurrentIndex(-1)
+        if select_name is not None:
+            for i, loop in enumerate(self._current_loops):
+                if loop["name"] == select_name:
+                    self.loop_combo.setCurrentIndex(i)
+                    break
+        self.loop_combo.setEnabled(bool(self._current_loops))
+        self.del_loop_btn.setEnabled(self.loop_combo.currentIndex() >= 0)
+
+    def _on_loop_selected(self, index):
+        if not 0 <= index < len(self._current_loops):
+            return
+        loop = self._current_loops[index]
+        self._on_region_selected(loop["a"], loop["b"])
+        self.timeline.zoom_to(loop["a"], loop["b"])
+        self.del_loop_btn.setEnabled(True)
+
+    def _on_save_loop(self):
+        a, b = self.player.mark_a, self.player.mark_b
+        if a is None or b is None or a >= b or not self.player.filepath:
+            return
+        default = f"{fmt_time(a)}-{fmt_time(b)}"
+        name, ok = QInputDialog.getText(self, "Save Loop", "Name:",
+                                        text=default)
+        if not ok or not name.strip():
+            return
+        self.loop_store.add(self.player.filepath, name.strip(), a, b)
+        self._refresh_loops(select_name=name.strip())
+
+    def _on_delete_loop(self):
+        index = self.loop_combo.currentIndex()
+        if not 0 <= index < len(self._current_loops):
+            return
+        self.loop_store.remove(self.player.filepath,
+                               self._current_loops[index]["name"])
+        self._refresh_loops()
 
     def _change_speed(self, delta):
         self._set_speed(self.player.playback_rate + delta)

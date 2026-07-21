@@ -68,6 +68,56 @@ def test_region_select_enables_loop(win):
     assert win.player.mark_a == 500 and win.player.mark_b == 1500
 
 
+def test_nudge_marks(win):
+    _fake_position(win, 2000)
+    win._on_mark_a()
+    _fake_position(win, 4000)
+    win._on_mark_b()
+
+    win._nudge_mark("a", 50)
+    assert win.player.mark_a == 2050
+    win._nudge_mark("a", -100)
+    assert win.player.mark_a == 1950
+    win._nudge_mark("b", -50)
+    assert win.player.mark_b == 3950
+
+    win._nudge_mark("a", 99999)  # clamps at B
+    assert win.player.mark_a == 3950
+    win._nudge_mark("b", -99999)  # clamps at A
+    assert win.player.mark_b == 3950
+    win._nudge_mark("b", 99999)  # clamps at duration
+    assert win.player.mark_b == 5000
+
+
+def test_nudge_without_mark_is_noop(win):
+    win._nudge_mark("a", 50)
+    assert win.player.mark_a is None
+
+
+def test_saved_loops_roundtrip(win, tone_files, tmp_path, monkeypatch):
+    from clipcara.loops import LoopStore
+    win.loop_store = LoopStore(str(tmp_path / "loops.json"))
+    win._open_file(str(tone_files["wav16"]))
+    assert not win.loop_combo.isEnabled()
+
+    win._apply_marks(1000, 2500)
+    monkeypatch.setattr("clipcara.main_window.QInputDialog.getText",
+                        staticmethod(lambda *a, **k: ("my loop", True)))
+    win._on_save_loop()
+    assert win.loop_combo.count() == 1
+    assert "my loop" in win.loop_combo.itemText(0)
+
+    # clearing marks then recalling the loop restores and enables it
+    win._on_clear_marks()
+    win._on_loop_selected(0)
+    assert win.player.mark_a == 1000 and win.player.mark_b == 2500
+    assert win.player.loop_enabled
+
+    win._on_delete_loop()
+    assert win.loop_combo.count() == 0
+    assert win.loop_store.loops_for(str(tone_files["wav16"])) == []
+
+
 def test_speed_steps_and_clamps(win):
     win._set_speed(1.0)
     win._change_speed(0.05)
