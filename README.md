@@ -1,7 +1,7 @@
 # Clipcara
 
 A-B loop audio player. Open a file, mark points A and B, and the selection
-repeats. Intended for transcription and phrase practice.
+repeats. Intended for language learners listening practice.
 
 Playback uses Qt Multimedia. The waveform is decoded with libsndfile
 (wav, flac, ogg, mp3). Formats libsndfile cannot decode (m4a, aac, wma)
