@@ -455,6 +455,10 @@ class MainWindow(QMainWindow):
             return
         loop = self._current_loops[index]
         self._on_region_selected(loop["a"], loop["b"])
+        # jump into the loop so playback switches immediately and the
+        # playhead sits inside the zoomed view (otherwise view-follow
+        # pages the display back to the old position)
+        self.player.seek(loop["a"])
         self.timeline.zoom_to(loop["a"], loop["b"])
         self.del_loop_btn.setEnabled(True)
 

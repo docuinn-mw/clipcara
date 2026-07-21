@@ -142,12 +142,22 @@ class AudioPlayer(QObject):
         self._loader = None
         self._view_loader = None
         self._pending_loaders = set()
+        self._seek_target = None
+        self._seek_stale = 0
 
         self.loop_enabled = False
         self.mark_a = None
         self.mark_b = None
 
     def _on_position_changed(self, pos):
+        # Right after a seek the backend can still deliver a periodic
+        # update carrying the pre-seek position; passing it through
+        # makes the UI (view-follow, labels) jump back briefly.
+        if self._seek_target is not None:
+            if abs(pos - self._seek_target) > 1000 and self._seek_stale < 5:
+                self._seek_stale += 1
+                return
+            self._seek_target = None
         # With loop on, playback is confined to [A, B]: anything at or
         # past B snaps back to A, including when loop was just enabled
         # with the playhead already beyond B.
@@ -259,12 +269,18 @@ class AudioPlayer(QObject):
         self._player.stop()
 
     def seek(self, position_ms):
-        self._player.setPosition(int(position_ms))
+        target = int(position_ms)
+        self._player.setPosition(target)
+        self._seek_target = target
+        self._seek_stale = 0
+        # reflect the new position immediately; the backend's own
+        # positionChanged can lag a periodic update behind
+        self.positionChanged.emit(target)
 
     def skip_relative(self, delta_ms):
         pos = self._player.position()
         new_pos = max(0, min(pos + delta_ms, self._player.duration()))
-        self._player.setPosition(int(new_pos))
+        self.seek(new_pos)
 
     @property
     def position(self):

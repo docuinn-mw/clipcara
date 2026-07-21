@@ -118,6 +118,24 @@ def test_saved_loops_roundtrip(win, tone_files, tmp_path, monkeypatch):
     assert win.loop_store.loops_for(str(tone_files["wav16"])) == []
 
 
+def test_loop_selection_seeks_into_loop(win, tone_files, tmp_path):
+    from clipcara.loops import LoopStore
+    win.loop_store = LoopStore(str(tmp_path / "loops.json"))
+    win._open_file(str(tone_files["wav16"]))
+    win.loop_store.add(str(tone_files["wav16"]), "x", 1000, 2500)
+    win._refresh_loops()
+    win._on_duration_changed(5000)  # media duration arrives async
+
+    seeks = []
+    win.player._player.setPosition = seeks.append
+    win._on_loop_selected(0)
+    assert 1000 in seeks  # playback jumps to the loop's A
+    assert win.timeline.position == 1000  # UI reflects it immediately
+    # playhead sits inside the zoomed view, so view-follow won't page away
+    assert win.timeline.view_start <= 1000 <= win.timeline.view_end
+    assert win.player.loop_enabled
+
+
 def test_speed_steps_and_clamps(win):
     win._set_speed(1.0)
     win._change_speed(0.05)

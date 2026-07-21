@@ -52,6 +52,20 @@ def test_end_of_media_restarts_loop(qapp):
     assert seeks == [1000] and plays == [1]
 
 
+def test_seek_emits_position_and_suppresses_stale_updates(qapp):
+    p = AudioPlayer()
+    positions = []
+    p.positionChanged.connect(positions.append)
+    p.seek(5000)
+    assert positions == [5000]
+    p._on_position_changed(1200)  # stale pre-seek backend update
+    assert positions == [5000]
+    p._on_position_changed(5050)  # backend caught up
+    assert positions == [5000, 5050]
+    p._on_position_changed(700)  # later real position passes through
+    assert positions == [5000, 5050, 700]
+
+
 def test_end_of_media_without_loop_stops(qapp):
     p = make_player(qapp)
     p.loop_enabled = False
